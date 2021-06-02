@@ -1,0 +1,1287 @@
+---
+title: "Masteroppgave ML"
+output: html_notebook
+---
+
+```{r}
+#importing librarys 
+library(lubridate)
+library(copula)
+library(VineCopula)
+library(EnvStats)
+```
+
+```{r}
+#read dataframes from local csv files
+setwd("~/Desktop")
+draw <- read.csv(file = "rawdata.csv", header=TRUE) #Raw data
+df15 <- read.csv(file= "data15min.csv", header=TRUE) #15min noise level indicator data
+
+draw
+df15
+```
+
+```{r}
+#Making sure that the raw data frames only consist of complete data (no NAs)
+draw <- draw[complete.cases(draw), ]
+```
+
+```{r}
+#Making filtered data frames for work, no work and a busy hour
+filter_data <-function(data,filter1,bool1,filter2,bool2,filter3,bool3){
+  del_list <- c()
+  count <- 1
+  for (i in 1:length(data$time)){
+    if((filter1[i]!=bool1)|(filter2[i]!=bool2)|(filter3[i]!=bool3)){
+      del_list[count] <- i
+      count <- count + 1
+    }
+  }
+  new_data <- data[-del_list, ]
+  return(new_data)
+}
+
+anti_filter_data <-function(data,filter1,bool1,filter2,bool2,filter3,bool3){
+  del_list <- c()
+  count <- 1
+  for (i in 1:length(data$time)){
+    if((filter1[i]!=bool1)&(filter2[i]!=bool2)&(filter3[i]!=bool3)){
+      del_list[count] <- i
+      count <- count + 1
+    }
+  }
+  new_data <- data[-del_list, ]
+  return(new_data)
+}
+
+df15_work <- filter_data(df15,df15$holiday,FALSE,df15$weekend,FALSE, df15$workhour,TRUE)
+df15_nowork <- anti_filter_data(df15,df15$holiday,TRUE,df15$weekend,TRUE, df15$workhour,FALSE)
+
+draw_work <- filter_data(draw,draw$holiday,FALSE,draw$weekend,FALSE, draw$workhour,TRUE)
+draw_nowork <- anti_filter_data(draw,draw$holiday,TRUE,draw$weekend,TRUE, draw$workhour,FALSE)
+
+filter_data_hour <- function(data,hour){
+  del_list <- c()
+  count <- 1
+  for (i in 1:length(data$time)){
+    if(hour(data$time[i])!=hour){
+      del_list[count] <- i
+      count <- count + 1
+    }
+  }
+  new_data <- data[-del_list, ]
+  return(new_data)
+}
+
+#choose busy hour from 12:00 to 13:00
+df15_work12 <- filter_data_hour(df15_work,12)
+draw_work12 <- filter_data_hour(draw_work,12)
+```
+
+```{r}
+#adding time column for plotting 
+df15$time2 <- ymd_hms(df15$time)
+df15_work$time2 <- ymd_hms(df15_work$time)
+df15_nowork$time2 <- ymd_hms(df15_nowork$time)
+df15_work12$time2 <- ymd_hms(df15_work12$time)
+draw$time2 <- ymd_hms(draw$time)
+```
+
+
+--------------------------
+EXPLORING THE KOOPEN DATA
+--------------------------
+```{r}
+#plotting all raw data
+plot(draw$time2,draw$Leq,type="l",main=expression(paste("Raw data, ", x[t])),xlab=" ",ylab="Noise level (dB)")
+```
+
+```{r}
+#plotting a week of data
+a_week <- 311271 # draw$time[a_week] = "2019-02-17 00:00:01+00:00"
+b_week <- 600275 # draw$time[b_week] = "2019-02-24 00:00:00+00:00"
+plot(draw$time2[a_week:b_week],draw$Leq[a_week:b_week],type="l",main=expression(paste("Raw data, ",x[t])),ylab="Noise level (dB)",xlab="Sunday     Monday     Tuesday   Wednesday   Thursday    Friday    Saturday")
+```
+
+```{r}
+#plotting the kernel density of the different data sets d for the raw data
+plot(density(draw$Leq,na.rm = TRUE),main=" ",xlab="Noise level(dB)",ylim = c(0,0.45),xlim = c(40,90)) #expression(paste("f(x"^paste(raw,",",d),"(t))"))
+lines(density(draw_work$Leq,na.rm = TRUE),main="Work raw data",xlab="Noise level in dB",ylab="f()",ylim = c(0,0.45),xlim = c(40,90),col="purple")
+lines(density(draw_nowork$Leq,na.rm = TRUE),main="No work raw data",xlab="Noise level in dB",ylab="Density",ylim = c(0,0.45),xlim = c(40,90),col="lightblue")
+lines(density(draw_work12$Leq,na.rm = TRUE),main="Busy hour raw data",xlab="Noise level in dB",ylab="Density",ylim = c(0,0.45),xlim = c(40,90),col="orange")
+legend(70, 0.45, legend=c("All", "Work","No work","Busy hour"),
+       col=c("black","purple", "lightblue","orange"),lty=1:1,cex=0.8)
+```
+
+```{r}
+#Setting up the auto correlation functions for different data sets d of the raw data
+ACFall <- acf(draw$Leq,na.action = na.pass,lag.max=10000)
+ACFwork <- acf(draw_work$Leq,na.action = na.pass,lag.max=10000)
+ACFnowork <- acf(draw_nowork$Leq,na.action = na.pass,lag.max=10000)
+ACFwork12 <- acf(draw_work12$Leq,na.action = na.pass,lag.max=1800)
+```
+
+```{r}
+#Plotting the ACF for all data sets d of the raw data in one plot
+plot(ACFall$lag,ACFall$acf,type="l",xlab="Lag",ylab="ACF",main=" ")
+lines(ACFwork$lag,ACFwork$acf,col="purple")
+lines(ACFnowork$lag,ACFnowork$acf,col="lightblue")
+lines(ACFwork12$lag,ACFwork12$acf,col="orange")
+legend(7000, 1, legend=c("All", "Work","No work","Busy hour"),
+       col=c("black","purple", "lightblue","orange"),lty=1:1,cex=0.8)
+```
+
+```{r}
+#Plotting a quarter of raw data Wednesday 20.02.2019 09-09:15
+a_day <- 449601 #draw$time[449601] = Wednesday 20.02.2019 09
+b_day <- 450031 #draw$time[450031] = Wednesday 20.02.2019 09:15
+L_10 <- df15$L10[1317] #L_10 Wednesday 20.02.2019 09-09:15
+L_50 <- df15$L50[1317] #L_50 Wednesday 20.02.2019 09-09:15
+L_90 <- df15$L90[1317] #L_90 Wednesday 20.02.2019 09-09:15
+
+plot(draw$time2[a_day:b_day],draw$Leq[a_day:b_day],type="l",main=expression(paste("Raw data, ",x[t], ": Wednesday 20.02.2019 09:00-09:15")),xlab="Time",ylab="Noise level(dB)")
+abline(h=L_10,col="red") #L10
+abline(h=L_50,col="blue") #L150
+abline(h=L_90,col="orange") #L90
+legend(draw$time2[a_day], 60, legend=c("Raw data",expression(L[10]),expression(L[50]),expression(L[90])),
+       col=c("black","red","blue","orange"),lty=1:1,cex=0.6)
+```
+
+```{r}
+#Plotting all indicators L from df15 for all raw data
+par(mfrow=c(2,2))
+plot(df15$time2,df15$L10,type="l",main=expression("L"[10]^all),xlab=" ",ylab="Noise level (dB)",ylim=c(40,80))
+abline(h=50, col="green")
+abline(h=60, col="red")
+legend(df15$time2[5420], 80, legend=c("Good below","Poor above"),col=c("green","red"),lty=1:1,cex=0.4)
+
+plot(df15$time2,df15$L50,type="l",main=expression("L"[50]^all),xlab=" ",ylab="Noise level (dB)",ylim=c(40,80))
+abline(h=45, col="green")
+abline(h=55, col="red")
+legend(df15$time2[5420], 80, legend=c("Good below","Poor above"),col=c("green","red"),lty=1:1,cex=0.4)
+
+plot(df15$time2,df15$L90,type="l",main=expression("L"[90]^all),xlab=" ",ylab="Noise level (dB)",ylim=c(40,80))
+abline(h=42, col="green")
+abline(h=52, col="red")
+legend(df15$time2[5420], 80, legend=c("Good below","Poor above"),col=c("green","red"),lty=1:1,cex=0.4)
+
+plot(df15$time2,df15$L1090,type="l",main=expression("L"[10-90]^all),xlab=" ",ylab="Noise level (dB)",ylim=c(0,40))
+abline(h=3, col="green")
+abline(h=5, col="red")
+legend(df15$time2[5420], 40, legend=c("Good below","Poor above"),col=c("green","red"),lty=1:1,cex=0.4)
+```
+
+```{r}
+#Defining weekly references based on the median L50 from df15
+#Using all data from 2019-02-06 16:15:00 to 2019-04-26 17:45:00
+
+weekly_reference <- function(timelist, indicator){
+  week <- c(rep(0,672)) #672 quarters in a week
+  count <- c(rep(0,672))
+  for (i in 0:10){ #11 weeks in our dataset
+    for (j in 1:672){
+      step <- 319+i*672+j 
+      if((!is.na(indicator[step]))){
+        week[j] <- week[j] + indicator[step]
+        count[j] <- count[j]+1
+        }
+      }
+  }
+  return(week/count)
+}
+
+timelist <- df15$time[320:991] #timestamps for looking at exact one week
+weekly_ref <- weekly_reference(timelist,df15$L50)
+df_weekly_ref <- data.frame(value=weekly_ref,day=wday(timelist),hour=hour(timelist),minute=minute(timelist))
+
+plot(weekly_ref,type="l",main=expression(paste("Weekly reference, ",mu[50]^tow)), ylab="Noise level(dB)",xlab="Sunday     Monday     Tuesday   Wednesday   Thursday    Friday    Saturday",xaxt='n',ylim=c(41,62))
+
+df_weekly_ref
+```
+
+------------------------------
+TRANSFORMATION OF MARGINALS
+------------------------------
+
+```{r}
+#Illustration of the transformation process from X to U for a bivariate distribution function
+x <- rnorm(2000,0,1)
+y <- rnorm(2000,0,1)
+plot(x,y,xlab=expression(X[1]),ylab=expression(X[2]))
+
+plot(ecdf(x),xlab="X",ylab="U=F(X)",main=" ")
+
+xytot <- data.frame("x"=x,"y"=y)
+u <- pobs(as.matrix(xytot))
+plot(u,xlab=expression(U[1]),ylab=expression(U[2]))
+
+```
+
+```{r}
+#Setting up and plotting marginals of conditional Model 1 for the whole raw data set; all, work, no work and busy hour
+#The marginals are one sample apart (approximatly 2seconds)
+d1 <- draw$Leq[1:(length(draw$Leq)-1)]
+d2 <- draw$Leq[2:length(draw$Leq)]
+w1 <- draw_work$Leq[1:(length(draw_work$Leq)-1)]
+w2 <- draw_work$Leq[2:length(draw_work$Leq)]
+n1 <- draw_nowork$Leq[1:(length(draw_nowork$Leq)-1)]
+n2 <- draw_nowork$Leq[2:length(draw_nowork$Leq)]
+b1 <- draw_work12$Leq[1:(length(draw_work12$Leq)-1)]
+b2 <- draw_work12$Leq[2:length(draw_work12$Leq)]
+
+par(mfrow=c(2,2))
+plot(d1,d2,main="All", xlab=expression(X[1]),ylab=expression(X[2]))
+plot(w1,w2,main="Work", xlab=expression(X[1]),ylab=expression(X[2]))
+plot(n1,n2,main="No work", xlab=expression(X[1]),ylab=expression(X[2]))
+plot(b1,b2,main="Busy hour", xlab=expression(X[1]),ylab=expression(X[2]))
+```
+
+```{r}
+#Unitary matrices for the transformed raw week data on [0,1] scale for conditional model 1
+dtot <- data.frame("x"=d1,"y"=d2)
+dtot[is.na(dtot)] <- 0
+u_d <- pobs(as.matrix(dtot))
+
+wtot <- data.frame("x"=w1,"y"=w2)
+wtot[is.na(wtot)] <- 0
+u_w <- pobs(as.matrix(wtot))
+
+ntot <- data.frame("x"=n1,"y"=n2)
+ntot[is.na(ntot)] <- 0
+u_n <- pobs(as.matrix(ntot))
+
+btot <- data.frame("x"=b1,"y"=b2)
+btot[is.na(btot)] <- 0
+u_b <- pobs(as.matrix(btot))
+```
+
+```{r}
+#Scatterplots of unitariy values on [0,1] for conditional Model 1
+par(mfrow=c(2,2))
+plot(u_d, col = densCols(u_d), pch = 20,xlab="U1",ylab="U2",main="All")
+plot(u_w, col = densCols(u_w), pch = 20,xlab="U1",ylab="U2",main="Work")
+plot(u_n, col = densCols(u_n), pch = 20,xlab="U1",ylab="U2",main="No work")
+plot(u_b, col = densCols(u_b), pch = 20,xlab="U1",ylab="U2",main="Busy hour")
+```
+
+
+```{r}
+#Setting up marginals for conditional Model 2
+#extract weekly reference from all raw values at given tow to gain dataset with diffs
+make_diffdata <- function(data,a,b,df_mean){
+  diff_draw <- c()
+  times <- c(0,15,30,45)
+  for (i in a:b){
+    timestamp <- data$time[i]
+    d <- wday(timestamp)
+    h <- hour(timestamp)
+    m <- which.min(abs(times - minute(timestamp)))
+    mean <- 1+(96*(d-1))+(4*h)+(m-1)
+    diff_draw[i] <- data$Leq[i] - df_mean$value[mean]
+  }
+  return(diff_draw)
+}
+
+diff_draw <- make_diffdata(draw,1,length(draw$Leq),df_weekly_ref)
+diff_draw_work <- make_diffdata(draw_work,1,length(draw_work$Leq),df_weekly_ref)
+diff_draw_nowork <- make_diffdata(draw_nowork,1,length(draw_nowork$Leq),df_weekly_ref)
+diff_draw_work12 <- make_diffdata(draw_work12,1,length(draw_work12$Leq),df_weekly_ref)
+```
+
+```{r}
+#Unitary matrices for the transformed week diff data on [0,1] scale for conditional Model 2
+#The marginals are one sample apart (approximatly 2seconds)
+diff_dddtot2 <- data.frame("x"=diff_draw[1:(length(diff_draw)-1)],"y"=diff_draw[2:length(diff_draw)])
+diff_dddtot2[is.na(diff_dddtot2)] <- 0
+diff_u_d<- pobs(as.matrix(diff_dddtot2))
+
+diff_wwwtot2 <- data.frame("x"=diff_draw_work[1:(length(diff_draw_work)-1)],"y"=diff_draw_work[2:length(diff_draw_work)])
+diff_wwwtot2[is.na(diff_wwwtot2)] <- 0
+diff_u_w <- pobs(as.matrix(diff_wwwtot2))
+
+diff_nnntot2 <- data.frame("x"=diff_draw_nowork[1:(length(diff_draw_nowork)-1)],"y"=diff_draw_nowork[2:length(diff_draw_nowork)])
+diff_nnntot2[is.na(diff_nnntot2)] <- 0
+diff_u_n <- pobs(as.matrix(diff_nnntot2))
+
+diff_bbbtot2 <- data.frame("x"=diff_draw_work12[1:(length(diff_draw_work12)-1)],"y"=diff_draw_work12[2:length(diff_draw_work12)])
+diff_bbbtot2[is.na(diff_bbbtot2)] <- 0
+diff_u_b <- pobs(as.matrix(diff_bbbtot2))
+```
+
+
+```{r}
+#Scatterplots of unitariy values on [0,1] for conditional Model 2
+par(mfrow=c(2,2))
+plot(diff_u_d, col = densCols(diff_u_d), pch = 20,xlab="diff U1",ylab="diff U2",main="All")
+plot(diff_u_w, col = densCols(diff_u_w), pch = 20,xlab="diff U1",ylab="diff U2",main="Work")
+plot(diff_u_n, col = densCols(diff_u_n), pch = 20,xlab="diff U1",ylab="diff U2",main="No work")
+plot(diff_u_b, col = densCols(diff_u_b), pch = 20,xlab="diff U1",ylab="diff U2",main="Busy hour")
+```
+
+
+--------
+COPULAS
+--------
+
+#Select best fit copulas for conditional Model 1 between Gaussian Normal and Student t
+```{r}
+copula_u_d <- BiCopSelect(u_d[,1], u_d[,2], familyset = c(1,2),selectioncrit = "AIC")
+copula_u_d
+```
+
+```{r}
+copula_u_w <- BiCopSelect(u_w[,1], u_w[,2], familyset = c(1,2),selectioncrit = "AIC")
+copula_u_w
+```
+
+```{r}
+copula_u_n <- BiCopSelect(u_n[,1], u_n[,2], familyset = c(1,2),selectioncrit = "AIC")
+copula_u_n
+```
+
+```{r}
+copula_u_b <- BiCopSelect(u_b[,1], u_b[,2], familyset = c(1,2),selectioncrit = "AIC")
+copula_u_b
+```
+
+#Select best fit copulas for conditional Model 2 between Gaussian Normal and Student t
+```{r}
+copula_diff_u_d <- BiCopSelect(diff_u_d[,1], diff_u_d[,2], familyset = c(1,2),selectioncrit = "AIC")
+copula_diff_u_d
+```
+
+```{r}
+copula_diff_u_w <- BiCopSelect(diff_u_w[,1], diff_u_w[,2], familyset = c(1,2,3,5,6),selectioncrit = "AIC")
+copula_diff_u_w
+```
+
+```{r}
+copula_diff_u_n <- BiCopSelect(diff_u_n[,1], diff_u_n[,2], familyset = c(1:6),selectioncrit = "AIC")
+copula_diff_u_n
+```
+
+```{r}
+copula_diff_u_b <- BiCopSelect(diff_u_b[,1], diff_u_b[,2], familyset = c(1,2,3,5,6),selectioncrit = "AIC")
+copula_diff_u_b
+```
+
+#Set up copulas with copula package in R 
+```{r}
+cop_model <- normalCopula(dim=2)
+cop_model2 <- tCopula(dim=2)
+```
+
+#Fit normal copula parameters to the raw data for conditional Model 1
+```{r}
+fit_d <- fitCopula(cop_model,u_d,method="ml")
+fit_d
+```
+
+```{r}
+fit_w <- fitCopula(cop_model,u_w,method="ml")
+fit_w
+```
+
+```{r}
+fit_n <- fitCopula(cop_model,u_n,method="ml")
+fit_n
+```
+
+```{r}
+fit_b <- fitCopula(cop_model,u_b,method="ml")
+fit_b
+```
+
+#Fit student t copula parameters to the raw data for conditional Model 1
+```{r}
+fit_d_t <- fitCopula(cop_model2,u_d,method="ml")
+fit_d_t
+```
+
+```{r}
+fit_w_t <- fitCopula(cop_model2,u_www,method="ml")
+fit_w_t
+```
+
+```{r}
+fit_n_t <- fitCopula(cop_model2,u_n,method="ml")
+fit_n_t
+```
+
+```{r}
+fit_b_t <- fitCopula(cop_model2,u_b,method="ml")
+fit_b_t
+```
+
+#Fit normal diff copulas parameters to the raw diff data for conditional Model 2
+```{r}
+diff_fit_d <- fitCopula(cop_model,diff_u_d,method="ml")
+diff_fit_d
+```
+
+```{r}
+diff_fit_w <- fitCopula(cop_model,diff_u_w,method="ml")
+diff_fit_w
+```
+
+```{r}
+diff_fit_n <- fitCopula(cop_model,diff_u_n,method="ml")
+diff_fit_n
+```
+
+```{r}
+diff_fit_b <- fitCopula(cop_model,diff_u_b,method="ml")
+diff_fit_b
+```
+
+#Fit student t diff copula parameters to the raw diff data for conditional Model 2
+```{r}
+diff_fit_d_t <- fitCopula(cop_model2,diff_u_d,method="ml")
+diff_fit_d_t
+```
+
+```{r}
+diff_fit_w_t <- fitCopula(cop_model2,diff_u_w,method="ml")
+diff_fit_w_t
+```
+
+```{r}
+diff_fit_n_t <- fitCopula(cop_model2,diff_u_n,method="ml")
+diff_fit_n_t
+```
+
+```{r}
+diff_fit_b_t <- fitCopula(cop_model2,diff_u_b,method="ml")
+diff_fit_b_t
+```
+
+#Saved copula parameters for conditional Model 1 for simplicity
+```{r}
+rho_nd <- 0.9217
+rho_td <- 0.94 
+df_td <- 2.94
+
+rho_work_nd <- 0.8863 
+rho_work_td <- 0.9
+df_work_td <-  3.8
+
+rho_nowork_nd <- 0.8818 
+rho_nowork_td <- 0.91
+df_nowork_td <-  2.46
+
+rho_work12_nd <- 0.875 
+rho_work12_td <-  0.8944
+df_work12_td <-  3.7849
+```
+
+#Saved copula parameters for conditional Model 2 for simplicity
+```{r}
+diff_rho_nd <- 0.8082 
+diff_rho_td <- 0.92
+diff_df_td <- 2
+
+diff_rho_work_nd <- 0.7842 
+diff_rho_work_td <- 0.82
+diff_df_work_td <- 2
+
+diff_rho_nowork_nd <- 0.8682 
+diff_rho_nowork_td <- 0.93
+diff_df_nowork_td <- 2
+
+diff_rho_work12_nd <- 0.8106 
+diff_rho_work12_td <-0.8316 
+diff_df_work12_td <- 2.4017 
+```
+
+#setting up all 16 copulas
+```{r}
+Ntot <-persp(normalCopula(dim=2,rho_nd),dCopula,xlab=" ",ylab=" ",zlab="Copula density",main=expression(C[paste(M1,",",N)]^all))
+Ntot_work <- persp(normalCopula(dim=2,rho_work_nd),dCopula)
+Ntot_nowork <- persp(normalCopula(dim=2,rho_nowork_nd),dCopula)
+Ntot_work12 <- persp(normalCopula(dim=2,rho_work12_nd),dCopula)
+```
+
+```{r}
+diff_Ntot <-persp(normalCopula(dim=2,diff_rho_nd),dCopula,xlab=" ",ylab=" ",zlab="Copula density",main=expression(C[paste(M2,",",N)]^all))
+diff_Ntot_work <- persp(normalCopula(dim=2,diff_rho_work_nd),dCopula)
+diff_Ntot_nowork <- persp(normalCopula(dim=2,diff_rho_nowork_nd),dCopula)
+diff_Ntot_work12 <- persp(normalCopula(dim=2,diff_rho_work12_nd),dCopula)
+```
+
+```{r}
+Ttot <- persp(tCopula(dim=2,rho_td,df=df_td),dCopula,xlab=" ",ylab=" ",zlab="Copula density",main=expression(C[paste(M1,",",St)]^all))
+Ttot_work <- persp(tCopula(dim=2,rho_work_td,df=df_work_td),dCopula)
+Ttot_nowork <- persp(tCopula(dim=2,rho_nowork_td,df=df_nowork_td),dCopula)
+Ttot_work12 <- persp(tCopula(dim=2,rho_work12_td,df=df_work12_td),dCopula)
+```
+
+```{r}
+diff_Ttot <- persp(tCopula(dim=2,diff_rho_td,df=diff_df_td),dCopula,xlab=" ",ylab=" ",zlab="Copula density",main=expression(C[paste(M2,",",St)]^all))
+diff_Ttot_work <- persp(tCopula(dim=2,diff_rho_work_td,df=diff_df_work_td),dCopula)
+diff_Ttot_nowork <- persp(tCopula(dim=2,diff_rho_nowork_td,df=diff_df_nowork_td),dCopula)
+diff_Ttot_work12 <- persp(tCopula(dim=2,diff_rho_work12_td,df=diff_df_work12_td),dCopula)
+```
+
+
+---------------------------------------------------
+FUNCTIONS NEEDED FOR THE CONDITIONAL COPULA MODELS
+---------------------------------------------------
+
+```{r}
+#Function to withdraw probability function based on previous value from chosen copula
+findPreviousPDF <- function(value,C){
+  return(which.min(abs(C$x[1:25] - value)))
+}
+
+#Setting up previous CDF based on previous PDF 
+setupPreviousCDF <- function(prev,C){
+  #condfunc_nd <- plot(C$y,C$z[,prev],type="l",xlab="Next value",ylab="Copula",main="Given previous value 0.2")
+  cdf <- 0
+  cdf_list <- c()
+  count <- 1
+  for (i in C$z[,prev]){
+    cdf <- cdf + i
+    cdf_list[count] <- cdf
+    count <- count + 1
+  }
+  cdf_list <- cdf_list/cdf_list[length(cdf_list)]
+  new_cdf_list <- c()
+  count <- 1
+  for (i in cdf_list){
+    if (i<0.9999){
+      new_cdf_list[count] <- i
+      count <- count + 1 
+    }
+  }
+  return(new_cdf_list)
+}
+
+#Function that samples next value based on given copula and previous value
+sample_next <- function(previous,C){
+  prev <- findPreviousPDF(previous,C)
+  if(prev==1){
+    prev <- 2
+  }
+  cdf_list <- setupPreviousCDF(prev,C)
+  f <- approxfun(x=cdf_list,y=C$y[1:length(cdf_list)])
+  #plot(f,xlab="Random generated value [0,1]",ylab="Next value")
+  unif <- runif(1,min=0,max=cdf_list[length(cdf_list)])
+  return(f(unif))
+}
+
+#Simulation function to sample s given times
+simulate_process <- function(inital,C,s){
+  val <- inital
+  list <- c(val)
+  for (i in 1:s){
+    val <- sample_next(val,C)
+    list[i+1] <- val
+  }
+  return(list)
+}
+```
+
+```{r}
+#functions to set up noise level indicators 
+indicator_10 <- function(li,t){
+  if (length(li) ==0){
+    return(NA)
+  }else{
+    return(quantile(li,probs=0.9, na.rm = TRUE,
+         names = TRUE, type = t))
+  }
+}
+indicator_50 <- function(li,t){
+  if (length(li) ==0){
+    return(NA)
+  }else{
+    return(quantile(li,probs=0.5, na.rm = TRUE,
+         names = TRUE, type = t))
+  }
+}
+
+indicator_90 <- function(li,t){
+  if (length(li) ==0){
+    return(NA)
+  }else{
+    return(quantile(li,probs=0.1, na.rm = TRUE,
+         names = TRUE, type = t))
+  }
+}
+
+indicator_1090 <- function(i_10,i_90){
+  if ((is.na(i_10) | is.na(i_90))==TRUE){
+    return(NA)
+  }
+  return(i_10-i_90)
+}
+```
+
+```{r}
+#Function giving pointer to weekly reference based on timestamp
+mean_startpoint <- function(timestamp){
+  times <- c(0,15,30,45)
+  d <- wday(timestamp)
+  h <- hour(timestamp)
+  m <- which.min(abs(times - minute(timestamp)))
+  return(1+(96*(d-1))+(4*h)+(m-1))
+}
+```
+
+```{r}
+#To transform back to the original marginals for conditional model 1 we set up inverse CDFs
+setupInverseCDF <- function(e){
+  y_list <- seq(40,80,0.1)
+  x_list <- c()
+  count <- 1
+  for (i in y_list){
+    x_list[count] <- e(i)
+    count <- count +1
+  }
+  return(approxfun(x=x_list,y=y_list))
+}
+
+I <- setupInverseCDF(ecdf(draw$Leq))
+I_work <- setupInverseCDF(ecdf(draw_work$Leq))
+I_nowork <- setupInverseCDF(ecdf(draw_nowork$Leq))
+I_work12 <- setupInverseCDF(ecdf(draw_work12$Leq))
+
+#To transform back to the original marginals for conditional model 1 we set up inverse diff CDFs
+diff_setupInverseCDF <- function(e){
+  y_list <- seq(-12,37,0.1)
+  x_list <- c()
+  count <- 1
+  for (i in y_list){
+    x_list[count] <- e(i)
+    count <- count +1
+  }
+  return(approxfun(x=x_list,y=y_list))
+}
+
+diff_I <- diff_setupInverseCDF(ecdf(diff_draw)) 
+diff_I_work <- diff_setupInverseCDF(ecdf(diff_draw_work))
+diff_I_nowork <- diff_setupInverseCDF(ecdf(diff_draw_nowork))
+diff_I_work12 <- diff_setupInverseCDF(ecdf(diff_draw_work12))
+
+#Function to drive all unitary data through the inverse CDF
+unitary_to_noise <- function(I,u){
+  new_data <- c()
+  for (i in (1:length(u))){
+    new_data[i] <- I(u[i])
+  }
+  return(new_data)
+}
+```
+
+
+-----------------
+MODEL A QUARTER
+-----------------
+
+```{r}
+#Modelling one quarter by conditional Model 1
+simulationq <- function(C,I,initial){
+  converted_simulation <- c()
+  simulation <- simulate_process(initial,C,431)
+  for (j in 1:431){
+    converted_simulation[j] <- I(simulation[j])
+  }
+  return(converted_simulation)
+}
+
+#Modelling one quarter by conditional Model 1
+diff_simulationq <- function(C,I,df_week,initial,tow){
+  converted_simulation <- c()
+  mean_start <- 324
+  simulation <- simulate_process(initial,C,431)
+  for (j in 1:431){
+    converted_simulation[j] <- I(simulation[j]) + df_week$value[tow]
+  }
+  return(converted_simulation)
+}
+```
+
+```{r}
+#Follow a quarter through the simulation process
+x_0 <- draw$Leq[a_day]
+initial <- ecdf(draw$Leq)(x_0)
+sim_quarter1 <- simulationq(Ntot,I,initial)
+sim_quarter2 <- simulationq(Ttot,I,initial)
+
+plot(draw$time2[a_day:b_day],sim_quarter1, main=expression(paste("Conditional noise Model 1: ",x[0]," = 45.9")),type="l",ylab="Noise level(dB)",xlab="Time",ylim=c(40,60))
+lines(draw$time2[a_day:b_day],sim_quarter2,col="grey")
+legend(draw$time2[a_day],60,legend=c(expression(C[paste(M1,",",N)]^all),expression(C[paste(M1,",",St)]^all)),col=c("black","grey"),lty=1:1,cex=0.6)
+```
+
+
+```{r}
+#Follow a quarter through the diff simulation process
+x_0_diff <- diff_draw_new[449601]
+initial_diff <- ecdf(diff_draw_new)(x_0_diff)
+tow=324 #equals wed 09:00 for weekly ref
+diff_sim_quarter1 <- diff_simulationq(diff_Ntot,diff_I,df_weekly_ref,initial_diff,tow)
+diff_sim_quarter2 <- diff_simulationq(diff_Ttot,diff_I,df_weekly_ref,initial_diff,tow)
+
+plot(draw$time2[449601:450031],diff_sim_quarter1, main=expression(paste("Conditional noise Model 2: ",x[0]," = 45.9, tow = Wednesday 09:00")),type="l",ylab="Noise level(dB)",xlab="Time",ylim=c(40,60))
+lines(draw$time2[449601:450031],diff_sim_quarter2,col="grey")
+legend(draw$time2[449601],60,legend=c(expression(C[paste(M2,",",N)]^all),expression(C[paste(M2,",",St)]^all)),col=c("black","grey"),lty=1:1,cex=0.6)
+```
+
+
+--------------------------------
+MODEL 1000 SIMULATIONS OF QUARTERS
+--------------------------------
+```{r}
+#Simulation function for n simulations with s samples within each indicator-range for conditional Model 1
+simulation <- function(C,s,n,I){
+  converted_simulation <- c()
+  L10 <- c()
+  L50 <- c()
+  L90 <- c()
+  L1090 <- c()
+  for (i in 1:n){
+    initial <-  runif(1,min=0,max=0.999)
+    simulation <- simulate_process(initial,C,s)
+    for (j in 1:s){
+      converted_simulation[j] <- I(simulation[j])
+    }
+    L10[i] <- indicator_10(converted_simulation,7)
+    L50[i] <- indicator_50(converted_simulation,7)
+    L90[i] <- indicator_90(converted_simulation,7)
+    L1090[i] <- L10[i]-L90[i]
+  }
+  return(data.frame("L10"=L10,"L50"=L50,"L90"=L90,"L1090"=L1090))
+}
+
+#Simulation function for n simulations with s samples within each indicator-range for conditional Model 1
+diff_simulation <- function(C,s,n,I,data,data2,df_week){
+  converted_simulation <- c()
+  L10 <- c()
+  L50 <- c()
+  L90 <- c()
+  L1090 <- c()
+  E <- ecdf(data)
+  for (i in 1:n){
+    random_start <- sample(1:(length(data)-s), 1, replace=TRUE)
+    initial <- E(data[random_start])
+    mean_start <- mean_startpoint(data2$time[random_start])
+    simulation <- simulate_process(initial,C,s)
+    for (j in 1:s){
+      converted_simulation[j] <- I(simulation[j]) + df_week$value[mean_start]
+    }
+    L10[i] <- indicator_10(converted_simulation,7)
+    L50[i] <- indicator_50(converted_simulation,7)
+    L90[i] <- indicator_90(converted_simulation,7)
+    L1090[i] <- L10[i]-L90[i]
+  }
+  return(data.frame("L10"=L10,"L50"=L50,"L90"=L90,"L1090"=L1090))
+}
+```
+
+```{r}
+#Modeling by a conditional Normal copula model 1
+sim <- simulation(Ntot,450,1000,I)
+sim_work <- simulation(Ntot_work,450,1000,I_work)
+sim_nowork <- simulation(Ntot_nowork,450,1000,I_nowork)
+sim_work12 <- simulation(Ntot_work12,450,1000,I_work12)
+```
+
+```{r}
+#Modeling by a conditional Student t copula model 1
+sim_t <- simulation(Ttot,450,1000,I)
+sim_work_t <- simulation(Ttot_work,450,1000,I_work)
+sim_nowork_t <- simulation(Ttot_nowork,450,1000,I_nowork)
+sim_work12_t <- simulation(Ttot_work12,450,1000,I_work12)
+```
+
+```{r}
+#Modeling by a conditional Normal copula model 2
+diff_sim <- diff_simulation(diff_Ntot,450,1000,diff_I,diff_draw,draw,df_weekly_ref)
+diff_sim_work <- diff_simulation(diff_Ntot_work,450,1000,diff_I_work,diff_draw_work,draw_work,df_weekly_ref)
+diff_sim_nowork <- diff_simulation(diff_Ntot_nowork,450,1000,diff_I_nowork,diff_draw_nowork,draw_nowork,df_weekly_ref)
+diff_sim_work12 <- diff_simulation(diff_Ntot_work12,450,1000,diff_I_work12,diff_draw_work12,draw_work12,df_weekly_ref)
+```
+
+```{r}
+#Modeling by a conditional Student t copula model 2
+diff_sim_t <- diff_simulation(diff_Ttot,450,1000,diff_I,diff_draw,draw,df_weekly_ref)
+diff_sim_work_t <- diff_simulation(diff_Ttot_work,450,1000,diff_I_work,diff_draw_work,draw_work,df_weekly_ref)
+diff_sim_nowork_t <- diff_simulation(diff_Ttot_nowork,450,1000,diff_I_nowork,diff_draw_nowork,draw_nowork,df_weekly_ref)
+diff_sim_work12_t <- diff_simulation(diff_Ttot_work12,450,1000,diff_I_work12,diff_draw_work12,draw_work12,df_weekly_ref)
+```
+
+```{r}
+#Plotting results in density plots for different conditional model, copula familiy and data set d
+par(mfrow=c(2,2))
+
+plot(density(df15$L10,na.rm = TRUE),ylim=c(0,1.2),xlim=c(37,60),main=expression(L[10]^{all}),xlab="Noise level(dB)")
+lines(density(diff_sim$L10),col="blue")
+lines(density(sim$L10),col="red")
+lines(density(diff_sim_t$L10),col="green")
+lines(density(sim_t$L10),col="orange")
+legend(53, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^all) ,expression(C[paste(M2,",",N)]^all),expression(C[paste(M1,",",St)]^all),expression(C[paste(M2,",",St)]^all)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+plot(density(df15$L50,na.rm = TRUE),ylim=c(0,1.2),xlim=c(37,60),main=expression(L[50]^{all}),xlab="Noise level(dB)")
+lines(density(diff_sim$L50),col="blue")
+lines(density(sim$L50),col="red")
+lines(density(diff_sim_t$L50),col="green")
+lines(density(sim_t$L50),col="orange")
+legend(53, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^all) ,expression(C[paste(M2,",",N)]^all),expression(C[paste(M1,",",St)]^all),expression(C[paste(M2,",",St)]^all)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+plot(density(df15$L90,na.rm = TRUE),ylim=c(0,1.2),xlim=c(37,60),main=expression(L[90]^{all}),xlab="Noise level(dB)")
+lines(density(diff_sim$L90),col="blue")
+lines(density(sim$L90),col="red")
+lines(density(diff_sim_t$L90),col="green")
+lines(density(sim_t$L90),col="orange")
+legend(53, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^all) ,expression(C[paste(M2,",",N)]^all),expression(C[paste(M1,",",St)]^all),expression(C[paste(M2,",",St)]^all)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+plot(density(df15$L1090,na.rm = TRUE),ylim=c(0,1.2),xlim=c(0,20),main=expression(L[10-90]^{all}),xlab="Noise level(dB)")
+lines(density(diff_sim$L1090),col="blue")
+lines(density(sim$L1090),col="red")
+lines(density(diff_sim_t$L1090),col="green")
+lines(density(sim_t$L1090),col="orange")
+legend(13, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^all) ,expression(C[paste(M2,",",N)]^all),expression(C[paste(M1,",",St)]^all),expression(C[paste(M2,",",St)]^all)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+
+par(mfrow=c(2,2))
+
+plot(density(df15_work$L10,na.rm = TRUE),ylim=c(0,1.2),xlim=c(37,60),main=expression(L[10]^{work}),xlab="Noise level(dB)")
+lines(density(diff_sim_work$L10),col="blue")
+lines(density(sim_work$L10),col="red")
+lines(density(diff_sim_work_t$L10),col="green")
+lines(density(sim_work_t$L10),col="orange")
+legend(53, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^work) ,expression(C[paste(M2,",",N)]^work),expression(C[paste(M1,",",St)]^work),expression(C[paste(M2,",",St)]^work)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+plot(density(df15_work$L50,na.rm = TRUE),ylim=c(0,1.2),xlim=c(37,60),main=expression(L[50]^{work}),xlab="Noise level(dB)")
+lines(density(diff_sim_work$L50),col="blue")
+lines(density(sim_work$L50),col="red")
+lines(density(diff_sim_work_t$L50),col="green")
+lines(density(sim_work_t$L50),col="orange")
+legend(53, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^work) ,expression(C[paste(M2,",",N)]^work),expression(C[paste(M1,",",St)]^work),expression(C[paste(M2,",",St)]^work)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+
+plot(density(df15_work$L90,na.rm = TRUE),ylim=c(0,1.2),xlim=c(37,60),main=expression(L[90]^{work}),xlab="Noise level(dB)")
+lines(density(diff_sim_work$L90),col="blue")
+lines(density(sim_work$L90),col="red")
+lines(density(diff_sim_work_t$L90),col="green")
+lines(density(sim_work_t$L90),col="orange")
+legend(53, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^work) ,expression(C[paste(M2,",",N)]^work),expression(C[paste(M1,",",St)]^work),expression(C[paste(M2,",",St)]^work)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+
+plot(density(df15_work$L1090,na.rm = TRUE),ylim=c(0,1.2),xlim=c(0,20),main=expression(L[10-90]^{work}),xlab="Noise level(dB)")
+lines(density(diff_sim_work$L1090),col="blue")
+lines(density(sim_work$L1090),col="red")
+lines(density(diff_sim_work_t$L1090),col="green")
+lines(density(sim_work_t$L1090),col="orange")
+legend(13, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^work) ,expression(C[paste(M2,",",N)]^work),expression(C[paste(M1,",",St)]^work),expression(C[paste(M2,",",St)]^work)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+
+par(mfrow=c(2,2))
+
+plot(density(df15_nowork$L10,na.rm = TRUE),ylim=c(0,1.2),xlim=c(37,60),main=expression(L[10]^{nowork}),xlab="Noise level(dB)")
+lines(density(diff_sim_nowork$L10),col="blue")
+lines(density(sim_nowork$L10),col="red")
+lines(density(diff_sim_nowork_t$L10),col="green")
+lines(density(sim_nowork_t$L10),col="orange")
+legend(53, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^nowork) ,expression(C[paste(M2,",",N)]^nowork),expression(C[paste(M1,",",St)]^nowork),expression(C[paste(M2,",",St)]^nowork)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+
+plot(density(df15_nowork$L50,na.rm = TRUE),ylim=c(0,1.2),xlim=c(37,60),main=expression(L[50]^{nowork}),xlab="Noise level(dB)")
+lines(density(diff_sim_nowork$L50),col="blue")
+lines(density(sim_nowork$L50),col="red")
+lines(density(diff_sim_nowork_t$L50),col="green")
+lines(density(sim_nowork_t$L50),col="orange")
+legend(53, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^nowork) ,expression(C[paste(M2,",",N)]^nowork),expression(C[paste(M1,",",St)]^nowork),expression(C[paste(M2,",",St)]^nowork)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+
+plot(density(df15_nowork$L90,na.rm = TRUE),ylim=c(0,1.2),xlim=c(37,60),main=expression(L[90]^{nowork}),xlab="Noise level(dB)")
+lines(density(diff_sim_nowork$L90),col="blue")
+lines(density(sim_nowork$L90),col="red")
+lines(density(diff_sim_nowork_t$L90),col="green")
+lines(density(sim_nowork_t$L90),col="orange")
+legend(53, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^nowork) ,expression(C[paste(M2,",",N)]^nowork),expression(C[paste(M1,",",St)]^nowork),expression(C[paste(M2,",",St)]^nowork)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+plot(density(df15_nowork$L1090,na.rm = TRUE),ylim=c(0,1.2),xlim=c(0,20),main=expression(L[10-90]^{nowork}),xlab="Noise level(dB)")
+lines(density(diff_sim_nowork$L1090),col="blue")
+lines(density(sim_nowork$L1090),col="red")
+lines(density(diff_sim_nowork_t$L1090),col="green")
+lines(density(sim_nowork_t$L1090),col="orange")
+legend(13, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^nowork) ,expression(C[paste(M2,",",N)]^nowork),expression(C[paste(M1,",",St)]^nowork),expression(C[paste(M2,",",St)]^nowork)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+par(mfrow=c(2,2))
+
+plot(density(df15_work12$L10,na.rm = TRUE),ylim=c(0,1.2),xlim=c(37,60),main=expression(L[10]^{busyhour}),xlab="Noise level(dB)")
+lines(density(diff_sim_work12$L10),col="blue")
+lines(density(sim_work12$L10),col="red")
+lines(density(diff_sim_work12_t$L10),col="green")
+lines(density(sim_work12_t$L10),col="orange")
+legend(53, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^busyhour) ,expression(C[paste(M2,",",N)]^busyhour),expression(C[paste(M1,",",St)]^busyhour),expression(C[paste(M2,",",St)]^busyhour)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+
+plot(density(df15_work12$L50,na.rm = TRUE),ylim=c(0,1.2),xlim=c(37,60),main=expression(L[50]^{busyhour}),xlab="Noise level(dB)")
+lines(density(diff_sim_work12$L50),col="blue")
+lines(density(sim_work12$L50),col="red")
+lines(density(diff_sim_work12_t$L50),col="green")
+lines(density(sim_work12_t$L50),col="orange")
+legend(53, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^busyhour) ,expression(C[paste(M2,",",N)]^busyhour),expression(C[paste(M1,",",St)]^busyhour),expression(C[paste(M2,",",St)]^busyhour)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+plot(density(df15_work12$L90,na.rm = TRUE),ylim=c(0,1.2),xlim=c(37,60),main=expression(L[90]^{busyhour}),xlab="Noise level(dB)")
+lines(density(diff_sim_work12$L90),col="blue")
+lines(density(sim_work12$L90),col="red")
+lines(density(diff_sim_work12_t$L90),col="green")
+lines(density(sim_work12_t$L90),col="orange")
+legend(53, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^busyhour) ,expression(C[paste(M2,",",N)]^busyhour),expression(C[paste(M1,",",St)]^busyhour),expression(C[paste(M2,",",St)]^busyhour)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+
+plot(density(df15_work12$L1090,na.rm = TRUE),ylim=c(0,1.2),xlim=c(0,20),main=expression(L[10-90]^{busyhour}),xlab="Noise level(dB)")
+lines(density(diff_sim_work12$L1090),col="blue")
+lines(density(sim_work12$L1090),col="red")
+lines(density(diff_sim_work12_t$L1090),col="green")
+lines(density(sim_work12_t$L1090),col="orange")
+legend(13, 1.2, legend=c("Raw data",expression(C[paste(M1,",",N)]^busyhour) ,expression(C[paste(M2,",",N)]^busyhour),expression(C[paste(M1,",",St)]^busyhour),expression(C[paste(M2,",",St)]^busyhour)),col=c("black","red", "blue","orange","green"),lty=1:1,cex=0.5)
+```
+
+```{r}
+#needing same number of quarters for qq-plots
+#sim_qq <- simulation(Ntot,450,length(df15$L10),I)
+diff_sim_qq <- diff_simulation(diff_Ntot,450,length(df15$L10),diff_I,diff_draw,draw,df_weekly_ref)
+```
+
+```{r}
+#Plotting results in QQ-plot for different conditional model
+par(mfrow=c(2,2))
+qqPlot(df15$L10,diff_sim_qq$L10,main=expression(paste("QQ-plot of ",L[10]^all)),xlab="Quantiles of raw data",ylab="Quantiles of modelled data",pch=20,xlim=c(38,80),ylim=c(38,80))
+points(qqPlot(df15$L10,sim_qq$L10,plot.it = FALSE),col="blue",pch=20)
+abline(0, 1, col = 'red')
+legend(40, 78, legend=c(expression(C[paste(M1,",",N)]^all),expression(C[paste(M2,",",N)]^all)),col=c("blue","black"),lty=1:1,cex=0.5)
+
+qqPlot(df15$L50,diff_sim_qq$L50,main=expression(paste("QQ-plot of ",L[50]^all)),xlab="Quantiles of raw data",ylab="Quantiles of modelled data",pch=20,xlim=c(38,80),ylim=c(38,80))
+points(qqPlot(df15$L50,sim_qq$L50,plot.it = FALSE),col="blue",pch=20)
+abline(0, 1, col = 'red')
+legend(40, 78, legend=c(expression(C[paste(M1,",",N)]^all),expression(C[paste(M2,",",N)]^all)),col=c("blue","black"),lty=1:1,cex=0.5)
+
+qqPlot(df15$L90,diff_sim_qq$L90,main=expression(paste("QQ-plot of ",L[90]^all)),xlab="Quantiles of raw data",ylab="Quantiles of modelled data",pch=20,xlim=c(38,80),ylim=c(38,80))
+points(qqPlot(df15$L90,sim_qq$L90,plot.it = FALSE),col="blue",pch=20)
+abline(0, 1, col = 'red')
+legend(40, 78, legend=c(expression(C[paste(M1,",",N)]^all),expression(C[paste(M2,",",N)]^all)),col=c("blue","black"),lty=1:1,cex=0.5)
+
+qqPlot(df15$L1090,diff_sim_qq$L1090,main=expression(paste("QQ-plot of ",L[10-90]^all)),xlab="Quantiles of raw data",ylab="Quantiles of modelled data",pch=20,xlim=c(0,22),ylim=c(0,22))
+points(qqPlot(df15$L1090,sim_qq$L1090,plot.it = FALSE),col="blue",pch=20)
+abline(0, 1, col = 'red')
+legend(0, 21, legend=c(expression(C[paste(M1,",",N)]^all),expression(C[paste(M2,",",N)]^all)),col=c("blue","black"),lty=1:1,cex=0.5)
+
+```
+
+
+------------------
+DECISION MODELING
+------------------
+
+```{r}
+#Modeling function for decision making by conditional Model 2, constant tow and initial chosen
+diff_modelling_decision <- function(C,s,n,I,df_week,mean_start,initial){
+  converted_simulation <- c()
+  L10 <- c()
+  L50 <- c()
+  L90 <- c()
+  L1090 <- c()
+  for (i in 1:n){
+    simulation <- simulate_process(initial,C,s)
+    for (j in 1:s){
+      converted_simulation[j] <- I(simulation[j]) + df_week$value[mean_start]
+    }
+    L10[i] <- indicator_10(converted_simulation,7)
+    L50[i] <- indicator_50(converted_simulation,7)
+    L90[i] <- indicator_90(converted_simulation,7)
+    L1090[i] <- L10[i]-L90[i]
+  }
+  return(data.frame("L10"=L10,"L50"=L50,"L90"=L90,"L1090"=L1090))
+}
+
+```
+
+```{r}
+#set up functions for classification of indicator values
+label_L10 <-function(indicator){
+  if(is.na(indicator)){
+    return("NA")
+  }else if (indicator < 50){
+    return("good")
+  }else if (indicator > 60){
+    return("poor")
+  }
+  return("fair")
+}
+
+label_L50 <-function(indicator){
+  if(is.na(indicator)){
+    return("NA")
+  }else if (indicator < 45){
+    return("good")
+  }else if (indicator > 55){
+    return("poor")
+  }
+  return("fair")
+}
+
+label_L90 <-function(indicator){
+  if(is.na(indicator)){
+    return("NA")
+  }else if (indicator < 42){
+    return("good")
+  }else if (indicator > 52){
+    return("poor")
+  }
+  return("fair")
+}
+
+label_L1090 <-function(indicator){
+  if(is.na(indicator)){
+    return("NA")
+  } else if (indicator < 3){
+    return("good")
+  }else if (indicator > 5){
+    return("poor")
+  }
+  return("fair")
+}
+
+#Functions for counting classifications
+classcount <- function(L){
+  classcount <- c(0,0,0)
+  for (i in 1:length(L)){
+      label <- L[i]
+      if (label=="good"){
+        classcount[1] <- classcount[1]+1
+      } else if(label=="fair"){
+        classcount[2] <- classcount[2]+1
+      }else{
+        classcount[3] <- classcount[3]+1
+      }
+  }
+  return(classcount)
+}
+```
+
+```{r}
+#Checking which of the predictions there are most of
+obs_k <- function(pred_k){
+  if ((pred_k[1]>=pred_k[2])&(pred_k[1]>=pred_k[3])){
+    return (1)
+  }else if ((pred_k[2]>=pred_k[1])&(pred_k[2]>=pred_k[3])){
+    return (2)
+  }else{
+    return(3)
+  }
+}
+
+#Setting classification
+class <- function(i){
+  if (i==1){
+    return("good")
+  }else if(i==2){
+    return("fair")
+  }else{
+    return("poor")
+  }
+}
+
+#Calculating Brier score
+BS <- function(pred_k,i){
+  return ((pred_k[i]-1)^2)
+}
+
+#Making decision by utility function
+utility <- function(A,E){
+  if (E>A){
+    return(0) #No sample
+  }else{
+    return(1) #Sample
+  }
+}
+```
+
+```{r}
+#Function for modelling all tow decisions
+model_matrix <- function(C,S,diff_I,df_weekly_ref,startpoint_draw){
+  pointer <- startpoint_draw
+  pointer_df <- startpoint_df
+  e <- ecdf(diff_draw_new)
+  df <- data.frame("tow"=c(),"A"=c(),"k"=c())
+  for (i in 1:length(weekly_ref)){
+    tow <- i
+    diff_prev_val <- diff_draw_new[pointer]
+    initial <- e(diff_prev_val)
+    df_modelled_L <- diff_modelling_decision(C,450,S,diff_I,df_weekly_ref,tow,initial)
+    modelled_L10 <- df_modelled_L$L10 #list of length S
+    modelled_L50 <- df_modelled_L$L50 
+    modelled_L90 <- df_modelled_L$L50 
+    modelled_L1090 <- df_modelled_L$L50 
+    modelled_k_L10 <- c()
+    modelled_k_L50 <- c()
+    modelled_k_L90 <- c()
+    modelled_k_L1090 <- c()
+    for (j in 1:length(modelled_L10)){
+       modelled_k_L10[j] <- label_L10(modelled_L10[j])
+       modelled_k_L50[j] <- label_L50(modelled_L50[j])
+       modelled_k_L90[j] <- label_L90(modelled_L90[j])
+       modelled_k_L1090[j] <- label_L1090(modelled_L1090[j])
+       }
+    modelled_k_count_L10 <- classcount(modelled_k_L10) #list with three elements of classcount for good, fair and poor, respectively
+    modelled_k_count_L50 <- classcount(modelled_k_L50)
+    modelled_k_count_L90 <- classcount(modelled_k_L90)
+    modelled_k_count_L1090 <- classcount(modelled_k_L1090)
+    k_L10 <- obs_k(modelled_k_count_L10)
+    k_L50 <- obs_k(modelled_k_count_L50)
+    k_L90 <- obs_k(modelled_k_count_L90)
+    k_L1090 <- obs_k(modelled_k_count_L1090)
+    classification_L10 <- class(k_L10)
+    classification_L50 <- class(k_L50)
+    classification_L90 <- class(k_L90)
+    classification_L1090 <- class(k_L1090)
+    A_L10 <- BS(modelled_k_count_L10/S,k_L10)
+    A_L50 <- BS(modelled_k_count_L50/S,k_L50)
+    A_L90 <- BS(modelled_k_count_L90/S,k_L90)
+    A_L1090 <- BS(modelled_k_count_L1090/S,k_L1090)
+    
+    pointer <- pointer + 430 
+    pointer_df <- pointer_df + 1
+    df <- rbind(df,data.frame("tow"=c(tow),"L10_kestim"=c(classification_L10),"L10_A"=c(A_L10),"L10_p"=c((modelled_k_count_L10/S)[k_L10]),"L50_kestim"=c(classification_L50),"L50_A"=c(A_L50),"L50_p"=c((modelled_k_count_L50/S)[k_L50]),"L90_kestim"=c(classification_L90),"L90_A"=c(A_L90),"L90_p"=c((modelled_k_count_L90/S)[k_L90]),"L1090_kestim"=c(classification_L1090),"L1090_A"=c(A_L1090),"L1090_p"=c((modelled_k_count_L1090/S)[k_L1090])))
+  }
+  return(df)
+}
+```
+
+```{r}
+#Setting up time list for one week to use in data frame
+timelist <- df15$time[320:991] #timestamps for looking at exact one week
+time <- format(ymd_hms(timelist), "%H:%M:%S")
+
+#Make decision matrix for all tow
+startpoint_draw <- 311270 #"2019-02-16 23:59:59+00:00" used as start previous value for the week we want to model
+decision <- model_matrix(M2_N,100,diff_I,df_weekly_ref,startpoint_draw)
+dec <- cbind("time"=time,decision)
+dec
+
+```
+
+```{r}
+#Plot decision for all tow for all E
+E1 <- 0.005
+E2 <- 0.05
+E3 <- 0.15
+
+binary_decision_matrix <- function(A,E){
+  binary <- c()
+  for (i in 1:length(A)){
+    binary[i] <- utility(A[i],E)
+  }
+  decision_matrix <- matrix(unlist(binary), ncol = 96, byrow = TRUE)
+  return(decision_matrix)
+}
+
+dec_E1 <- binary_decision_matrix(dec$L10_A,E1) #Here L10 is chosen, can switch to L50
+dec_E2 <- binary_decision_matrix(dec$L10_A,E2)
+dec_E3 <- binary_decision_matrix(dec$L10_A,E3)
+
+rownames <- c("Sun","Mon","Tue","Wed","Thu","Fri","Sat")
+colnames <- c("00:00","00:15","00:30","00:45","01:00","01:15","01:30","01:45","02:00","02:15","02:30","02:45","03:00","03:15","03:30","03:45","04:00","04:15","04:30","04:45","05:00","05:15","05:30","05:45","06:00","06:15","06:30","06:45","07:00","07:15","07:30","07:45","08:00","08:15","08:30","08:45","09:00","09:15","09:30","09:45","10:00","10:15","10:30","10:45","11:00","11:15","11:30","11:45","12:00","12:15","12:30","12:45","13:00","13:15","13:30","13:45","14:00","14:15","14:30","14:45","15:00","15:15","15:30","15:45","16:00","16:15","16:30","16:45","17:00","17:15","17:30","17:45","18:00","18:15","18:30","18:45","19:00","19:15","19:30","19:45","20:00","20:15","20:30","20:45","21:00","21:15","21:30","21:45","22:00","22:15","22:30","22:45","23:00","23:15","23:30","23:45")
+library(SparseM)
+
+par(mfrow=c(2,1)) 
+image(as.matrix.csr(dec_E1),ylab="Sat   Fri   Thu   Wed   Tue   Mon   Sun",xaxt='n') 
+axis(3, at = 1:ncol(as.matrix.csr(dec_E1)), labels=colnames)
+image(as.matrix.csr(dec_E2),ylab="Sat   Fri   Thu   Wed   Tue   Mon   Sun",xaxt='n') 
+axis(3, at = 1:ncol(as.matrix.csr(dec_E2)), labels=colnames)
+image(as.matrix.csr(dec_E3),xlab="Time of day",ylab="Sat   Fri   Thu   Wed   Tue   Mon   Sun",xaxt='n')
+axis(3, at = 1:ncol(as.matrix.csr(dec_E3)), labels=colnames)
+```
+
+```{r}
+#looking at different previous values
+prev_values <- c(40,45,60,80,90)
+tow1 <- 225 # Tuesday 08:00
+tow2 <- 233 # Tuesday 10:00
+tow3 <- 325 # Wednesday 09:00
+tow4 <- 575 # Friday 23:30
+```
+
+```{r}
+#Functions to model based on different previous value and given tow
+
+#For L10
+modelling_differentx0_L10 <- function(prev_values,tow,df_weekly_ref,C,S){
+  df <- data.frame("previous"=c(),"A"=c(),"k"=c())
+  for (i in 1:length(prev_values)){
+    diff_prev_val <- prev_values[i] - df_weekly_ref$value[tow]
+    initial <- e(diff_prev_val)
+    df_modelled_L <- diff_modelling_decision(C,450,S,diff_I,df_weekly_ref,tow,initial)
+    modelled_L <- df_modelled_L$L10 #list of length S
+    modelled_k <- c()
+    for (j in 1:length(modelled_L)){
+       modelled_k[j] <- label_L10(modelled_L[j])
+    }
+    modelled_k_count <- classcount(modelled_k) #list with three elements of classcount for good, fair and poor, respectively
+    k <- obs_k(modelled_k_count)
+    classification <- class(k)
+    A <- BS(modelled_k_count/S,k)
+    df <- rbind(df,data.frame("previous"=c(prev_values[i]),"A"=c(A),"k"=c(classification),"p"=c((modelled_k_count/S)[k])))
+  }
+  return(df)
+}
+
+#For L50
+modelling_differentx0_L50 <- function(prev_values,tow,df_weekly_ref,C,S){
+  df <- data.frame("previous"=c(),"A"=c(),"k"=c())
+  for (i in 1:length(prev_values)){
+    diff_prev_val <- prev_values[i] - df_weekly_ref$value[tow]
+    initial <- e(diff_prev_val)
+    df_modelled_L <- diff_modelling_decision(C,450,S,diff_I,df_weekly_ref,tow,initial)
+    modelled_L <- df_modelled_L$L50 #list of length S
+    modelled_k <- c()
+    for (j in 1:length(modelled_L)){
+       modelled_k[j] <- label_L50(modelled_L[j])
+    }
+    modelled_k_count <- classcount(modelled_k) #list with three elements of classcount for good, fair and poor, respectively
+    k <- obs_k(modelled_k_count)
+    classification <- class(k)
+    A <- BS(modelled_k_count/S,k)
+    df <- rbind(df,data.frame("previous"=c(prev_values[i]),"A"=c(A),"k"=c(classification),"p"=c((modelled_k_count/S)[k])))
+  }
+  return(df)
+}
+```
+
+
+```{r}
+#modeled A(t) for different previous values and three tow for L10
+model_A <- modelling_differentx0_L10(prev_values,tow1,df_weekly_ref,M2_N,100)
+model_B <- modelling_differentx0_L10(prev_values,tow2,df_weekly_ref,M2_N,100)
+model_C <- modelling_differentx0_L10(prev_values,tow3,df_weekly_ref,M2_N,100)
+```
+
+```{r}
+#modeled A(t) for different previous values and three tow for L50
+model_D <- modelling_differentx0_L50(prev_values,tow1,df_weekly_ref,M2_N,100)
+model_E <- modelling_differentx0_L50(prev_values,tow3,df_weekly_ref,M2_N,100)
+model_F <- modelling_differentx0_L50(prev_values,tow4,df_weekly_ref,M2_N,100)
+```
+
+```{r}
+#Plotted decision for different presios values of L10
+plot(prev_values,model_A$A,main=" ",xlab="Sampled previous noise level(dB)",ylab=" ",type="l",ylim=c(0,0.25),col="grey")
+lines(prev_values,model_B$A,col="navy")
+lines(prev_values,model_C$A)
+abline(h=E1,col="red",lty=2)
+abline(h=E2,col="orange",lty=2)
+abline(h=E3,col="yellow",lty=2)
+legend(75, 0.25, legend=c("A(t), tow = Tuesday 08:00","A(t), tow = Tuesday 10:00","A(t), tow = Wednesday 09:00","E = 0.005","E = 0.05","E = 0.15"),col=c("grey","navy","black","red","orange","yellow"),lty=1:1,cex=0.6)
+
+#Plotted decision for different presios values of L50
+plot(prev_values,model_D$A,main=" ",xlab="Sampled previous noise level(dB)",ylab=" ",type="l",ylim=c(0,0.25),col="grey")
+lines(prev_values,model_E$A,col="navy")
+lines(prev_values,model_F$A)
+abline(h=E1,col="red",lty=2)
+abline(h=E2,col="orange",lty=2)
+abline(h=E3,col="yellow",lty=2)
+legend(75, 0.25, legend=c("A(t), tow = Tuesday 08:00","A(t), tow = Wednesday 09:00","A(t), tow = Friday 23:30","E = 0.005","E = 0.05","E = 0.15"),col=c("grey","navy","black","red","orange","yellow"),lty=1:1,cex=0.6)
+```
